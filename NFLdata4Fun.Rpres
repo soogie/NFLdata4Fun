@@ -1,0 +1,221 @@
+Rでアメフトの次のプレーを　予測する
+========================================================
+author: Takeshi Sugiyama
+date: 2015/12/05
+width:1280
+height:800
+
+```{r setup, include=FALSE}
+require(data.table)
+require(rpart)
+require(partykit)
+require(dplyr)
+```
+
+
+自己紹介
+========================================================
+杉山　剛（@soogie すーぎー）
+
+- 事務系サラリーマン
+- 日頃はSASとExcelにまみれてます
+- R歴1年くらいです
+- 初心者ですが職場にRを普及すべく初心者向け勉強会開催中
+- 趣味はアメフト観戦。日本ではオービックシーガルスのファン
+- 以前レザークラフトに凝っていた時にスーパーカブを自分で革張りにしたりしました
+
+これが革張りのスーパーカブ！
+========================================================
+![](images/kawacub01.jpg)
+![](images/kawacub02.jpg)
+
+というのは今日の話とは無関係で...
+
+
+
+アメフトシーズン到来
+========================================================
+
+- 本場アメリカのプロフットボールリーグ **NFL**
+- 2016/2/7 第50回スーパーボウルに向け32チームが激戦中
+- 日本の社会人アメフト **Xリーグ**
+- 12/14の社会人日本一決定戦 **Japan X BOWL** に向け激戦中
+- 1/3には学生日本一との日本一決定戦 **RICE BOWL**
+
+
+
+
+アメフトのルール（超簡略版）
+========================================================
+
+- 100ヤード先の敵のゴールエリアにボールを運ぶ
+- 4回の攻撃で10ヤード進めなければ攻守交代
+- 10ヤード進んだらまた4回の攻撃権を取得
+- ボールを投げる（パス）か，抱えて走る（ラン）か
+- 4回目の攻撃で10ヤード到達が難しい時はパントで敵陣に蹴り込む
+- 負けているときは4回目も通常攻撃をすることもあり（ギャンブルと呼びます）
+
+パスかランか（超簡略版）
+========================================================
+<br>
+- パス：一気に進むことができる代わり，失敗のリスクが大きい
+- ラン：ボールを失うことは少ないがなかなか進めない
+- 短距離のパスもあるし，ランで数十ヤード進むこともある
+- 攻撃側は残りヤード数，点差などを踏まえてプレーを選択
+- 守備側は次のプレーを予測
+- プレーを予測しながら観戦すると楽しさ倍増
+
+NFLのデータを分析
+========================================================
+2002年から2012年のNFLのすべてのプレーを集めたデータ (https://github.com/veltman/nflplays) 
+```{r eval=FALSE}
+nfl <- fread("data/nflplays.csv", data.table = FALSE)
+```
+
+```{r include=FALSE}
+nfl <- fread("data/nflplays.csv", data.table = FALSE)
+nfl$RUNorPASS <- with(nfl, ifelse(PLAY_TYPE %like% "RUN.*", "RUN",
+                                  ifelse(PLAY_TYPE %like% "PASS.*", "PASS",
+                                         ifelse(PLAY_TYPE %like% "PUNT.*", "PUNT", "OTHER"))))
+nfl$RUNorPASS <- factor(nfl$RUNorPASS, levels = c("RUN", "PASS", "PUNT", "OTHER"))
+nfl$TOGO_LEVEL <- cut(nfl$YARDS_TO_FIRST, breaks = c( -Inf, 2, 5, 10, Inf),
+                     labels = c("0-2", "2-5", "5-10", "10-"), right = FALSE)
+nfl$REMAIN_SEC <- nfl$MIN * 60 + nfl$SEC
+nfl$DIFF <- nfl$OFF_SCORE - nfl$DEF_SCORE
+nfl <- subset(nfl, RUNorPASS != "OTHER" & DOWN >= 1 & DOWN <= 4)
+nfl$RUNorPASS <- factor(nfl$RUNorPASS, levels = c("RUN", "PASS", "PUNT"))
+```
+何回目の攻撃でどんなプレーをしているか
+```{r echo=FALSE}
+# ftable(nfl[c("DOWN", "RUNorPASS", "TOGO_LEVEL")])
+# ftable(nfl[c("TOGO_LEVEL", "DOWN", "RUNorPASS")])
+
+table(nfl[c("DOWN", "RUNorPASS")])
+```
+※ プレーの種類はもっと多様ですが単純化しています
+
+ロジスティック回帰
+========================================================
+ランかパスかの2者択一というふうに単純化して，ロジスティック回帰を試みます。
+```{r echo=FALSE}
+nfl_RorP <- subset(nfl, RUNorPASS == "RUN" | RUNorPASS == "PASS")
+nfl_glm <- glm(RUNorPASS ~ DOWN + YARDS_TO_FIRST, family=binomial(link="logit"), data = nfl_RorP)
+nfl_glm
+```
+
+
+パス確率の計算
+========================================================
+ロジスティック回帰の結果より<br>
+
+$$
+パスの確率 = \frac{1}{1+e^(-2.09 + 0.73 ダウン + 0.12 残りヤード)}
+$$
+
+- ファーストダウン残り10ヤードのときは `r round(1/(1+exp(-(-2.09 + 0.73 * 1 + 0.12 * 10))),2) * 100`パーセント  
+→　ほぼ五分五分。ややラン
+
+- セカンドダウン残り2ヤードのときは`r round(1/(1+exp(-(-2.09 + 0.73 * 2 + 0.12 * 2))),2) * 100`パーセント  
+→　パスよりはランで確実に
+
+- サードダウン残り18ヤードのときは`r round(1/(1+exp(-(-2.09 + 0.73 * 3 + 0.12 * 18))),2) * 100`パーセント  
+→　ランでは無理。パスで起死回生
+
+決定木でもやってみる
+========================================================
+せっかくなので，第何クオーター(QTR)か，敵との点差(DIFF)も加味して決定木を作ってみます。<br>
+勝っているときの第1，2ダウンはランを選びがち。第3ダウンは残り1.5ヤード以上ならパスのようです。
+```{r echo=FALSE, eval=FALSE}
+nfl_RorP %>% 
+  with(data.frame(RUNorPASS = as.factor(RUNorPASS),
+                  DOWN = as.factor(DOWN),
+                  TOGO_LEVEL,
+                  YARDS_TO_FIRST,
+                  QTR = as.factor(QTR),
+                  DIFF)) %>%
+  rpart(RUNorPASS ~ DOWN + YARDS_TO_FIRST + QTR + DIFF, data = ., method = "class") %>%
+#  rpart.plot(type = 1, uniform = TRUE, extra = 1, under = 1, faclen = 0)
+  as.party() %>%
+  plot()
+```
+![](images/tree01.png)
+
+
+チームの戦略の違いもあります
+========================================================
+<br>
+パスを選択しがち  
+- パスが得意なQBがいる
+- キャッチが得意なワイドレシーバーがいる
+
+
+<br>
+ランを選択しがち  
+- 突進力のあるランニングバックがいる
+- QBの足が速く，ピンチになると自ら走ってしまう
+
+
+シアトルシーホークスのラッセル・ウィルソンのようにパスがうまくて，自分が走っても速い，手に負えないQBもいます。
+
+
+```{r eval=FALSE, echo=FALSE}
+
+SF_RorP <- subset(nfl_RorP, OFF == "SF")
+SF_glm <- glm(RUNorPASS ~ DOWN + YARDS_TO_FIRST, family=binomial(link="logit"), data = SF_RorP)
+SF_RorP %>% 
+  with(data.frame(RUNorPASS = as.factor(RUNorPASS),
+                  DOWN = as.factor(DOWN),
+                  TOGO_LEVEL,
+                  YARDS_TO_FIRST,
+                  QTR = as.factor(QTR),
+                  DIFF)) %>%
+  rpart(RUNorPASS ~ DOWN + YARDS_TO_FIRST + QTR + DIFF, data = ., method = "class") %>%
+#  rpart.plot(type = 1, uniform = TRUE, extra = 1, under = 1, faclen = 0)
+  as.party() %>%
+  plot()
+
+SEA_RorP <- subset(nfl_RorP, OFF == "SEA")
+SEA_glm <- glm(RUNorPASS ~ DOWN + YARDS_TO_FIRST, family=binomial(link="logit"), data = SEA_RorP)
+SEA_RorP %>% 
+  with(data.frame(RUNorPASS = as.factor(RUNorPASS),
+                  DOWN = as.factor(DOWN),
+                  TOGO_LEVEL,
+                  YARDS_TO_FIRST,
+                  QTR = as.factor(QTR),
+                  DIFF)) %>%
+  rpart(RUNorPASS ~ DOWN + YARDS_TO_FIRST + QTR + DIFF, data = ., method = "class") %>%
+#  rpart.plot(type = 1, uniform = TRUE, extra = 1, under = 1, faclen = 0)
+  as.party() %>%
+  plot()
+
+```
+
+
+サンフランシスコ49ers(2012年当時)
+========================================================
+<br>
+![](images/tree_sf.png)
+<br>
+パスが得意なQBアレックス・スミスが活躍していた頃です。パスが多めですね
+
+
+
+シアトルシーホークス(2012年当時)
+========================================================
+![](images/tree_sea.png)
+<br>
+当時はラッセル・ウィルソンはいませんでしたがランの比率が高いのは「ビースト」として知られるランニングバック，マーショーン・リンチのおかげでしょう
+
+結論
+========================================================
+次のプレーを予測しながら見ると，アメフト観戦がめちゃめちゃ楽しくなるよ！
+
+<div align="center">
+<img src=images/seagulls02.jpg>
+</div>
+
+Enjoy!!
+========================================================
+<div align="center">
+<img src=images/enjoy.png>
+</div>
